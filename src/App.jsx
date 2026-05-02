@@ -22,21 +22,28 @@ const GAMES = [
   { id: "8", date: "2026-06-07", day: "Sunday",   time: "7:00 PM",  venue: "Casey's", opponent: "End Zone Shuters" },
 ];
 
-// Firebase setup (with safe fallbacks for local development).
-const firebaseConfigRaw =
-  typeof window !== 'undefined' && window.__firebase_config ? window.__firebase_config : '{}';
-let firebaseConfig = {};
-try {
-  firebaseConfig = JSON.parse(firebaseConfigRaw);
-} catch (e) {
-  firebaseConfig = {};
+// Firebase setup. Reads from Vite env vars (VITE_FIREBASE_*) at build time;
+// falls back to window.__firebase_config (legacy) and finally to local-only
+// mode using localStorage when no config is present.
+const envConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+};
+
+let firebaseConfig = envConfig.apiKey ? envConfig : {};
+if (!firebaseConfig.apiKey && typeof window !== 'undefined' && window.__firebase_config) {
+  try { firebaseConfig = JSON.parse(window.__firebase_config); } catch (e) { firebaseConfig = {}; }
 }
 
 const hasFirebaseConfig = !!firebaseConfig.apiKey;
 const app = hasFirebaseConfig ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'sharks-8ball-v2';
+const appId = typeof __app_id !== 'undefined' ? __app_id : (firebaseConfig.projectId || 'sharks-8ball-v2');
 
 export default function App() {
   const [user, setUser] = useState(null);
