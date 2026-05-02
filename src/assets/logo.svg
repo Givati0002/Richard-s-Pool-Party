@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <radialGradient id="flameGrad" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#fff3a8" />
+      <stop offset="35%" stop-color="#ff9a1f" />
+      <stop offset="70%" stop-color="#ff4d00" />
+      <stop offset="100%" stop-color="#7a1500" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="ballGrad" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#1ad6d6" />
+      <stop offset="55%" stop-color="#00a8a8" />
+      <stop offset="100%" stop-color="#003c3c" />
+    </radialGradient>
+    <radialGradient id="sharkGrad" cx="40%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#3fc6d4" />
+      <stop offset="60%" stop-color="#0a6f88" />
+      <stop offset="100%" stop-color="#062b3a" />
+    </radialGradient>
+  </defs>
+
+  <!-- Flame burst background -->
+  <g>
+    <circle cx="200" cy="200" r="190" fill="url(#flameGrad)" opacity="0.95" />
+    <g fill="#ff6a1a" opacity="0.85">
+      <path d="M200 10 q 14 40 0 70 q -14 -30 0 -70 z" />
+      <path d="M40 80 q 35 25 50 60 q -40 -10 -50 -60 z" />
+      <path d="M360 80 q -35 25 -50 60 q 40 -10 50 -60 z" />
+      <path d="M30 320 q 40 -15 70 0 q -30 30 -70 0 z" />
+      <path d="M370 320 q -40 -15 -70 0 q 30 30 70 0 z" />
+      <path d="M200 390 q 18 -36 0 -70 q -18 30 0 70 z" />
+    </g>
+  </g>
+
+  <!-- 8-ball -->
+  <g transform="translate(200 230)">
+    <circle r="105" fill="url(#ballGrad)" stroke="#001f1f" stroke-width="3" />
+    <circle r="38" cx="-6" cy="-6" fill="#fafafa" />
+    <text x="-6" y="10" text-anchor="middle" font-family="Georgia, serif" font-weight="bold" font-size="56" fill="#0d0f0e">8</text>
+    <ellipse cx="-30" cy="-50" rx="22" ry="9" fill="#ffffff" opacity="0.35" />
+  </g>
+
+  <!-- Shark silhouette above -->
+  <g transform="translate(200 130)" fill="url(#sharkGrad)" stroke="#021b25" stroke-width="2">
+    <path d="M-115 5
+             C -90 -55, -30 -75, 20 -55
+             C 60 -40, 95 -10, 110 15
+             C 80 5, 50 5, 25 15
+             C 0 25, -35 30, -75 25
+             C -100 22, -115 15, -115 5 Z" />
+    <path d="M-60 -45 L -45 -75 L -25 -45 Z" fill="#062b3a" />
+    <circle cx="60" cy="-25" r="5" fill="#ff2a00" />
+    <!-- Teeth -->
+    <g fill="#ffffff" stroke="#0a3142" stroke-width="1">
+      <polygon points="55,15 60,28 65,15" />
+      <polygon points="68,15 73,30 78,15" />
+      <polygon points="80,15 85,28 90,15" />
+    </g>
+  </g>
+
+  <!-- Title arc -->
+  <text x="200" y="385" text-anchor="middle" font-family="Impact, 'Arial Black', sans-serif" font-size="28" fill="#0d0f0e" letter-spacing="3">SAN PEDRO SHARKS</text>
+</svg>
