@@ -3,7 +3,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, collection, doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { Calendar, MapPin, Clock, Users, Circle, Flame, Waves, ShieldCheck } from 'lucide-react';
-import logo from './assets/logo.svg';
+import logo from './assets/logo.jpeg';
 
 // --- CONFIGURATION & DATA ---
 const PLAYERS = [
