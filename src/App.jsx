@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import {
@@ -6,7 +6,7 @@ import {
 } from 'firebase/firestore';
 import {
   Calendar, MapPin, Clock, Users, Circle, Flame, Waves, ShieldCheck,
-  Pencil, Trash2, Plus, Check, X, Settings,
+  Pencil, Trash2, Plus, Check, X, Settings, Undo2, Redo2,
 } from 'lucide-react';
 import logoSrc from './assets/logo.jpeg';
 
@@ -26,6 +26,8 @@ const DEFAULT_GAMES = [
   { id: "7", date: "2026-06-02", day: "Tuesday",  time: "7:00 PM",  venue: "Casey's", opponent: "Hustle and Muscle" },
   { id: "8", date: "2026-06-07", day: "Sunday",   time: "7:00 PM",  venue: "Casey's", opponent: "End Zone Shuters" },
 ];
+
+const STACK_LIMIT = 30;
 
 // --- Firebase setup ---
 const envConfig = {
@@ -82,6 +84,14 @@ const metaDoc = () => doc(db, 'artifacts', appId, 'public', 'data', 'meta', 'ini
 const attendanceCol = () => collection(db, 'artifacts', appId, 'public', 'data', 'attendance');
 const attendanceDoc = (id) => doc(db, 'artifacts', appId, 'public', 'data', 'attendance', id);
 
+// Build an undo/redo pair: each closure runs its op and returns the opposite closure.
+function makeUndoPair(undoOp, redoOp) {
+  let undoFn, redoFn;
+  undoFn = async () => { await undoOp(); return redoFn; };
+  redoFn = async () => { await redoOp(); return undoFn; };
+  return undoFn;
+}
+
 // --- Logo with white-background flood-fill removal ---
 function TransparentLogo({ src, alt, className }) {
   const [processedSrc, setProcessedSrc] = useState(null);
@@ -112,7 +122,6 @@ function TransparentLogo({ src, alt, className }) {
           if (x < 0 || y < 0 || x >= w || y >= h) return;
           stack.push(y * w + x);
         };
-        // Seed all 4 edges (not just corners) so trapped white near borders also clears.
         for (let x = 0; x < w; x++) { seed(x, 0); seed(x, h - 1); }
         for (let y = 0; y < h; y++) { seed(0, y); seed(w - 1, y); }
 
@@ -159,12 +168,25 @@ export default function App() {
   const [editingPlayerIdx, setEditingPlayerIdx] = useState(null);
   const [editingPlayerName, setEditingPlayerName] = useState('');
 
+  // Undo/Redo: stacks of closures held in refs (mutable, no re-render),
+  // plus a counter that bumps to re-render the buttons when stacks change.
+  const undoStackRef = useRef([]);
+  const redoStackRef = useRef([]);
+  const [, setStackVer] = useState(0);
+  const bumpStack = useCallback(() => setStackVer((v) => v + 1), []);
+
+  const pushUndo = useCallback((fn, { clearRedo = true } = {}) => {
+    undoStackRef.current.push(fn);
+    if (undoStackRef.current.length > STACK_LIMIT) undoStackRef.current.shift();
+    if (clearRedo) redoStackRef.current = [];
+    bumpStack();
+  }, [bumpStack]);
+
   const loading = !auth ? false : (!attendanceLoaded || !gamesLoaded || !rosterLoaded);
 
   // --- Auth ---
   useEffect(() => {
     if (!auth) {
-      // Local-only mode: load everything from localStorage with defaults.
       try {
         const a = localStorage.getItem('sharks-attendance');
         if (a) setAttendance(JSON.parse(a));
@@ -196,7 +218,7 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // --- One-shot seed: write defaults if meta/init is missing ---
+  // --- One-shot seed ---
   useEffect(() => {
     if (!db || !user) return;
     let cancelled = false;
@@ -216,7 +238,7 @@ export default function App() {
     return () => { cancelled = true; };
   }, [user]);
 
-  // --- Subscribe: attendance ---
+  // --- Subscriptions ---
   useEffect(() => {
     if (!db || !user) return;
     const unsub = onSnapshot(
@@ -232,7 +254,6 @@ export default function App() {
     return () => unsub();
   }, [user]);
 
-  // --- Subscribe: games ---
   useEffect(() => {
     if (!db || !user) return;
     const unsub = onSnapshot(
@@ -249,7 +270,6 @@ export default function App() {
     return () => unsub();
   }, [user]);
 
-  // --- Subscribe: roster ---
   useEffect(() => {
     if (!db || !user) return;
     const unsub = onSnapshot(
@@ -263,31 +283,77 @@ export default function App() {
     return () => unsub();
   }, [user]);
 
-  // --- Mutations: attendance ---
-  const toggleAttendance = async (gameId, playerName) => {
-    const current = attendance[gameId] || [];
-    const updated = current.includes(playerName)
-      ? current.filter((p) => p !== playerName)
-      : [...current, playerName];
-
+  // --- Pure persistence helpers (no undo bookkeeping) ---
+  const persistAttendance = useCallback(async (gameId, confirmed) => {
     if (db && user) {
-      try {
-        await setDoc(attendanceDoc(gameId), { confirmed: updated }, { merge: true });
-      } catch (err) { console.error('Save error:', err); }
+      await setDoc(attendanceDoc(gameId), { confirmed }, { merge: true });
     } else {
-      const next = { ...attendance, [gameId]: updated };
-      setAttendance(next);
-      try { localStorage.setItem('sharks-attendance', JSON.stringify(next)); } catch (e) { /* ignore */ }
+      setAttendance((prev) => {
+        const next = { ...prev, [gameId]: confirmed };
+        try { localStorage.setItem('sharks-attendance', JSON.stringify(next)); } catch (e) { /* ignore */ }
+        return next;
+      });
     }
-  };
+  }, [user]);
 
-  // --- Mutations: games ---
-  const persistGamesLocal = (next) => {
-    setGames(next);
-    try { localStorage.setItem('sharks-games', JSON.stringify(next)); } catch (e) { /* ignore */ }
-  };
+  const persistGame = useCallback(async (game) => {
+    if (db && user) {
+      await setDoc(gameDoc(game.id), game);
+    } else {
+      setGames((prev) => {
+        const next = prev.filter((g) => g.id !== game.id).concat(game)
+          .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+        try { localStorage.setItem('sharks-games', JSON.stringify(next)); } catch (e) { /* ignore */ }
+        return next;
+      });
+    }
+  }, [user]);
 
-  const addGame = async ({ date, time, venue, opponent }) => {
+  const persistDeleteGame = useCallback(async (id) => {
+    if (db && user) {
+      await deleteDoc(gameDoc(id));
+      await deleteDoc(attendanceDoc(id)).catch(() => { /* ok if missing */ });
+    } else {
+      setGames((prev) => {
+        const next = prev.filter((g) => g.id !== id);
+        try { localStorage.setItem('sharks-games', JSON.stringify(next)); } catch (e) { /* ignore */ }
+        return next;
+      });
+      setAttendance((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        try { localStorage.setItem('sharks-attendance', JSON.stringify(next)); } catch (e) { /* ignore */ }
+        return next;
+      });
+    }
+  }, [user]);
+
+  const persistRoster = useCallback(async (newPlayers) => {
+    if (db && user) {
+      await setDoc(rosterDoc(), { players: newPlayers });
+    } else {
+      setPlayers(newPlayers);
+      try { localStorage.setItem('sharks-roster', JSON.stringify(newPlayers)); } catch (e) { /* ignore */ }
+    }
+  }, [user]);
+
+  // --- Public mutation helpers ---
+
+  const toggleAttendance = useCallback(async (gameId, playerName) => {
+    const before = [...(attendance[gameId] || [])];
+    const after = before.includes(playerName)
+      ? before.filter((p) => p !== playerName)
+      : [...before, playerName];
+    try {
+      await persistAttendance(gameId, after);
+    } catch (err) { console.error('Toggle error:', err); return; }
+    pushUndo(makeUndoPair(
+      async () => { await persistAttendance(gameId, before); },
+      async () => { await persistAttendance(gameId, after); },
+    ));
+  }, [attendance, persistAttendance, pushUndo]);
+
+  const addGame = useCallback(async ({ date, time, venue, opponent }) => {
     if (!date || !time || !opponent.trim() || !venue.trim()) return false;
     const newGame = {
       id: genId(),
@@ -297,84 +363,188 @@ export default function App() {
       opponent: opponent.trim(),
       day: dayFromDate(date),
     };
-    if (db && user) {
-      try {
-        await setDoc(gameDoc(newGame.id), newGame);
-        return true;
-      } catch (err) { console.error('Add game error:', err); return false; }
-    }
-    persistGamesLocal([...games, newGame].sort((a, b) => (a.date || '').localeCompare(b.date || '')));
+    try {
+      await persistGame(newGame);
+    } catch (err) { console.error('Add game error:', err); return false; }
+    pushUndo(makeUndoPair(
+      async () => { await persistDeleteGame(newGame.id); },
+      async () => { await persistGame(newGame); },
+    ));
     return true;
-  };
+  }, [persistGame, persistDeleteGame, pushUndo]);
 
-  const updateGame = async (id, patch) => {
+  const updateGame = useCallback(async (id, patch) => {
+    const oldGame = games.find((g) => g.id === id);
+    if (!oldGame) return false;
     const merged = {
+      ...oldGame,
       ...patch,
-      day: patch.date ? dayFromDate(patch.date) : undefined,
+      day: patch.date ? dayFromDate(patch.date) : oldGame.day,
     };
-    Object.keys(merged).forEach((k) => merged[k] === undefined && delete merged[k]);
-    if (db && user) {
-      try {
-        await setDoc(gameDoc(id), merged, { merge: true });
-        return true;
-      } catch (err) { console.error('Update game error:', err); return false; }
-    }
-    persistGamesLocal(games.map((g) => g.id === id ? { ...g, ...merged } : g));
+    try {
+      await persistGame(merged);
+    } catch (err) { console.error('Update game error:', err); return false; }
+    pushUndo(makeUndoPair(
+      async () => { await persistGame(oldGame); },
+      async () => { await persistGame(merged); },
+    ));
     return true;
-  };
+  }, [games, persistGame, pushUndo]);
 
-  const deleteGame = async (id) => {
-    if (db && user) {
-      try {
-        await deleteDoc(gameDoc(id));
-        await deleteDoc(attendanceDoc(id)).catch(() => { /* ok if missing */ });
-        return true;
-      } catch (err) { console.error('Delete game error:', err); return false; }
-    }
-    persistGamesLocal(games.filter((g) => g.id !== id));
-    const nextAtt = { ...attendance };
-    delete nextAtt[id];
-    setAttendance(nextAtt);
-    try { localStorage.setItem('sharks-attendance', JSON.stringify(nextAtt)); } catch (e) { /* ignore */ }
+  const deleteGame = useCallback(async (id) => {
+    const oldGame = games.find((g) => g.id === id);
+    if (!oldGame) return false;
+    const oldAttendance = [...(attendance[id] || [])];
+    try {
+      await persistDeleteGame(id);
+    } catch (err) { console.error('Delete game error:', err); return false; }
+    pushUndo(makeUndoPair(
+      async () => {
+        await persistGame(oldGame);
+        if (oldAttendance.length > 0) await persistAttendance(id, oldAttendance);
+      },
+      async () => { await persistDeleteGame(id); },
+    ));
     return true;
-  };
+  }, [games, attendance, persistDeleteGame, persistGame, persistAttendance, pushUndo]);
 
-  // --- Mutations: roster ---
-  const renamePlayer = async (oldName, rawNew) => {
+  const renamePlayer = useCallback(async (oldName, rawNew) => {
     const newName = (rawNew || '').trim();
     if (!newName || newName === oldName) return false;
     if (players.includes(newName)) {
       alert(`A player named "${newName}" already exists.`);
       return false;
     }
-    const nextPlayers = players.map((p) => p === oldName ? newName : p);
-
-    if (db && user) {
-      try {
-        await setDoc(rosterDoc(), { players: nextPlayers });
-        // Sweep attendance docs that contain the old name.
-        await Promise.all(games.map(async (g) => {
-          const att = attendance[g.id] || [];
-          if (!att.includes(oldName)) return;
-          const updated = att.map((p) => p === oldName ? newName : p);
-          await setDoc(attendanceDoc(g.id), { confirmed: updated }, { merge: true });
-        }));
-        return true;
-      } catch (err) { console.error('Rename error:', err); return false; }
-    }
-
-    setPlayers(nextPlayers);
-    try { localStorage.setItem('sharks-roster', JSON.stringify(nextPlayers)); } catch (e) { /* ignore */ }
-    const nextAtt = { ...attendance };
-    Object.keys(nextAtt).forEach((gid) => {
-      if (nextAtt[gid].includes(oldName)) {
-        nextAtt[gid] = nextAtt[gid].map((p) => p === oldName ? newName : p);
+    const oldRoster = [...players];
+    const newRoster = players.map((p) => p === oldName ? newName : p);
+    const swaps = [];
+    games.forEach((g) => {
+      const att = attendance[g.id] || [];
+      if (att.includes(oldName)) {
+        swaps.push({
+          gid: g.id,
+          before: [...att],
+          after: att.map((p) => p === oldName ? newName : p),
+        });
       }
     });
-    setAttendance(nextAtt);
-    try { localStorage.setItem('sharks-attendance', JSON.stringify(nextAtt)); } catch (e) { /* ignore */ }
+    try {
+      await persistRoster(newRoster);
+      await Promise.all(swaps.map((s) => persistAttendance(s.gid, s.after)));
+    } catch (err) { console.error('Rename error:', err); return false; }
+    pushUndo(makeUndoPair(
+      async () => {
+        await persistRoster(oldRoster);
+        await Promise.all(swaps.map((s) => persistAttendance(s.gid, s.before)));
+      },
+      async () => {
+        await persistRoster(newRoster);
+        await Promise.all(swaps.map((s) => persistAttendance(s.gid, s.after)));
+      },
+    ));
     return true;
-  };
+  }, [players, games, attendance, persistRoster, persistAttendance, pushUndo]);
+
+  const addPlayer = useCallback(async (rawName) => {
+    const name = (rawName || '').trim();
+    if (!name) return false;
+    if (players.includes(name)) {
+      alert(`A player named "${name}" already exists.`);
+      return false;
+    }
+    const oldRoster = [...players];
+    const newRoster = [...players, name];
+    try {
+      await persistRoster(newRoster);
+    } catch (err) { console.error('Add player error:', err); return false; }
+    pushUndo(makeUndoPair(
+      async () => { await persistRoster(oldRoster); },
+      async () => { await persistRoster(newRoster); },
+    ));
+    return true;
+  }, [players, persistRoster, pushUndo]);
+
+  const removePlayer = useCallback(async (name) => {
+    if (!players.includes(name)) return false;
+    const oldRoster = [...players];
+    const newRoster = players.filter((p) => p !== name);
+    const swaps = [];
+    games.forEach((g) => {
+      const att = attendance[g.id] || [];
+      if (att.includes(name)) {
+        swaps.push({
+          gid: g.id,
+          before: [...att],
+          after: att.filter((p) => p !== name),
+        });
+      }
+    });
+    try {
+      await persistRoster(newRoster);
+      await Promise.all(swaps.map((s) => persistAttendance(s.gid, s.after)));
+    } catch (err) { console.error('Remove player error:', err); return false; }
+    pushUndo(makeUndoPair(
+      async () => {
+        await persistRoster(oldRoster);
+        await Promise.all(swaps.map((s) => persistAttendance(s.gid, s.before)));
+      },
+      async () => {
+        await persistRoster(newRoster);
+        await Promise.all(swaps.map((s) => persistAttendance(s.gid, s.after)));
+      },
+    ));
+    return true;
+  }, [players, games, attendance, persistRoster, persistAttendance, pushUndo]);
+
+  // --- Undo / Redo ---
+  const onUndo = useCallback(async () => {
+    const fn = undoStackRef.current.pop();
+    if (!fn) return;
+    bumpStack();
+    try {
+      const redoFn = await fn();
+      redoStackRef.current.push(redoFn);
+      if (redoStackRef.current.length > STACK_LIMIT) redoStackRef.current.shift();
+    } catch (err) {
+      console.error('Undo failed:', err);
+    }
+    bumpStack();
+  }, [bumpStack]);
+
+  const onRedo = useCallback(async () => {
+    const fn = redoStackRef.current.pop();
+    if (!fn) return;
+    bumpStack();
+    try {
+      const undoFn = await fn();
+      undoStackRef.current.push(undoFn);
+      if (undoStackRef.current.length > STACK_LIMIT) undoStackRef.current.shift();
+    } catch (err) {
+      console.error('Redo failed:', err);
+    }
+    bumpStack();
+  }, [bumpStack]);
+
+  // Keyboard shortcuts: Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y = redo
+  useEffect(() => {
+    const handler = (e) => {
+      const target = e.target;
+      const tag = (target && target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (target && target.isContentEditable)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = (e.key || '').toLowerCase();
+      if (key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) onRedo(); else onUndo();
+      } else if (key === 'y') {
+        e.preventDefault();
+        onRedo();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onUndo, onRedo]);
 
   if (loading) {
     return (
@@ -391,6 +561,8 @@ export default function App() {
   const upcomingGames = games.filter((g) => new Date(g.date) >= today);
   const nextGame = upcomingGames[0] || games[0];
   const nextPlayers = nextGame ? (attendance[nextGame.id] || []) : [];
+  const undoCount = undoStackRef.current.length;
+  const redoCount = redoStackRef.current.length;
 
   return (
     <div className="min-h-screen bg-[#0d0f0e] text-[#f4f7f6] font-sans pb-20">
@@ -506,8 +678,34 @@ export default function App() {
           </div>
         )}
 
-        {/* Manage / Done toggle */}
-        <div className="mb-6 flex justify-end">
+        {/* Top toolbar: Undo/Redo + Manage */}
+        <div className="mb-6 flex justify-between items-center gap-2">
+          <div className="flex gap-2">
+            <button
+              onClick={onUndo}
+              disabled={undoCount === 0}
+              title="Undo (Ctrl+Z)"
+              className={`flex items-center gap-2 px-3 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition border-2 ${
+                undoCount === 0
+                  ? 'border-gray-800 text-gray-700 cursor-not-allowed'
+                  : 'border-orange-500 text-orange-400 hover:bg-orange-500 hover:text-white'
+              }`}
+            >
+              <Undo2 size={14} /> Undo
+            </button>
+            <button
+              onClick={onRedo}
+              disabled={redoCount === 0}
+              title="Redo (Ctrl+Shift+Z)"
+              className={`flex items-center gap-2 px-3 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition border-2 ${
+                redoCount === 0
+                  ? 'border-gray-800 text-gray-700 cursor-not-allowed'
+                  : 'border-teal-500 text-teal-400 hover:bg-teal-500 hover:text-white'
+              }`}
+            >
+              <Redo2 size={14} /> Redo
+            </button>
+          </div>
           <button
             onClick={() => { setEditMode((v) => !v); setEditingGameId(null); setEditingPlayerIdx(null); }}
             className={`flex items-center gap-2 px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition border-2 ${
@@ -516,7 +714,7 @@ export default function App() {
                 : 'bg-transparent border-gray-700 text-gray-300 hover:border-teal-500 hover:text-teal-400'
             }`}
           >
-            {editMode ? <><Check size={14} /> Done Editing</> : <><Settings size={14} /> Manage</>}
+            {editMode ? <><Check size={14} /> Done</> : <><Settings size={14} /> Manage</>}
           </button>
         </div>
 
@@ -526,23 +724,24 @@ export default function App() {
             players={players}
             editingPlayerIdx={editingPlayerIdx}
             editingPlayerName={editingPlayerName}
-            onStartEdit={(idx) => {
-              setEditingPlayerIdx(idx);
-              setEditingPlayerName(players[idx]);
-            }}
+            onStartEdit={(idx) => { setEditingPlayerIdx(idx); setEditingPlayerName(players[idx]); }}
             onChangeName={setEditingPlayerName}
             onCancel={() => { setEditingPlayerIdx(null); setEditingPlayerName(''); }}
             onSave={async () => {
               const ok = await renamePlayer(players[editingPlayerIdx], editingPlayerName);
               if (ok) { setEditingPlayerIdx(null); setEditingPlayerName(''); }
             }}
+            onAdd={addPlayer}
+            onRemove={async (name) => {
+              if (window.confirm(`Remove ${name} from the roster?`)) {
+                await removePlayer(name);
+              }
+            }}
           />
         )}
 
         {/* Edit-mode Add Game */}
-        {editMode && (
-          <AddGameForm onSubmit={addGame} />
-        )}
+        {editMode && <AddGameForm onSubmit={addGame} />}
 
         {/* Schedule header */}
         <div className="flex items-center gap-4 mb-8">
@@ -642,35 +841,41 @@ export default function App() {
                           </span>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
-                          {players.map((player) => {
-                            const isConfirmed = confirmed.includes(player);
-                            return (
-                              <button
-                                key={player}
-                                onClick={() => toggleAttendance(game.id, player)}
-                                disabled={isPast}
-                                className={`flex items-center justify-between px-4 py-3.5 rounded-2xl text-[10px] font-black transition-all border-2 ${
-                                  isConfirmed
-                                    ? 'text-white border-transparent'
-                                    : 'bg-white border-gray-200 text-gray-800 hover:border-teal-400'
-                                }`}
-                                style={
-                                  isConfirmed
-                                    ? { backgroundColor: COLORS.teal, boxShadow: `0 8px 20px -5px ${COLORS.teal}55` }
-                                    : {}
-                                }
-                              >
-                                <span className="truncate uppercase">{player}</span>
-                                {isConfirmed ? (
-                                  <ShieldCheck size={16} />
-                                ) : (
-                                  <Circle size={16} className="opacity-20" style={{ color: COLORS.teal }} />
-                                )}
-                              </button>
-                            );
-                          })}
-                        </div>
+                        {players.length === 0 ? (
+                          <div className="text-[11px] font-black text-gray-500 italic text-center py-4">
+                            No players in roster. Tap Manage to add players.
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-3">
+                            {players.map((player) => {
+                              const isConfirmed = confirmed.includes(player);
+                              return (
+                                <button
+                                  key={player}
+                                  onClick={() => toggleAttendance(game.id, player)}
+                                  disabled={isPast}
+                                  className={`flex items-center justify-between px-4 py-3.5 rounded-2xl text-[10px] font-black transition-all border-2 ${
+                                    isConfirmed
+                                      ? 'text-white border-transparent'
+                                      : 'bg-white border-gray-200 text-gray-800 hover:border-teal-400'
+                                  }`}
+                                  style={
+                                    isConfirmed
+                                      ? { backgroundColor: COLORS.teal, boxShadow: `0 8px 20px -5px ${COLORS.teal}55` }
+                                      : {}
+                                  }
+                                >
+                                  <span className="truncate uppercase">{player}</span>
+                                  {isConfirmed ? (
+                                    <ShieldCheck size={16} />
+                                  ) : (
+                                    <Circle size={16} className="opacity-20" style={{ color: COLORS.teal }} />
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     </>
                   )}
@@ -701,7 +906,23 @@ export default function App() {
 
 // --- Subcomponents ---
 
-function RosterEditor({ players, editingPlayerIdx, editingPlayerName, onStartEdit, onChangeName, onCancel, onSave }) {
+function RosterEditor({
+  players, editingPlayerIdx, editingPlayerName,
+  onStartEdit, onChangeName, onCancel, onSave,
+  onAdd, onRemove,
+}) {
+  const [newName, setNewName] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  const submitAdd = async (e) => {
+    e?.preventDefault?.();
+    if (!newName.trim() || adding) return;
+    setAdding(true);
+    const ok = await onAdd(newName);
+    setAdding(false);
+    if (ok) setNewName('');
+  };
+
   return (
     <div className="bg-white rounded-[2rem] p-6 mb-6 shadow-2xl">
       <div className="flex items-center gap-2 mb-4">
@@ -737,17 +958,43 @@ function RosterEditor({ players, editingPlayerIdx, editingPlayerName, onStartEdi
             );
           }
           return (
-            <button
-              key={idx}
-              onClick={() => onStartEdit(idx)}
-              className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-gray-100 hover:bg-teal-50 hover:border-teal-300 border-2 border-gray-100 text-sm font-bold text-gray-800 uppercase tracking-wide transition text-left"
-            >
-              <span>{p}</span>
-              <Pencil size={13} className="text-gray-400" />
-            </button>
+            <div key={idx} className="flex items-center gap-2">
+              <button
+                onClick={() => onStartEdit(idx)}
+                className="flex-1 flex items-center justify-between px-4 py-2.5 rounded-2xl bg-gray-100 hover:bg-teal-50 hover:border-teal-300 border-2 border-gray-100 text-sm font-bold text-gray-800 uppercase tracking-wide transition text-left"
+              >
+                <span>{p}</span>
+                <Pencil size={13} className="text-gray-400" />
+              </button>
+              <button
+                onClick={() => onRemove(p)}
+                className="p-2.5 rounded-full bg-gray-100 hover:bg-red-100 text-gray-600 hover:text-red-600 transition"
+                title={`Remove ${p}`}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           );
         })}
       </div>
+
+      {/* Add player form */}
+      <form onSubmit={submitAdd} className="mt-4 flex gap-2 items-center pt-4 border-t border-gray-200">
+        <input
+          type="text"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder="New player name…"
+          className="flex-1 px-4 py-2.5 border-2 border-gray-200 rounded-2xl text-sm font-bold text-gray-900 focus:outline-none focus:border-teal-500"
+        />
+        <button
+          type="submit"
+          disabled={!newName.trim() || adding}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-teal-500 hover:bg-teal-600 disabled:bg-gray-300 text-white font-black uppercase text-[11px] tracking-widest transition"
+        >
+          <Plus size={14} /> Add
+        </button>
+      </form>
     </div>
   );
 }
