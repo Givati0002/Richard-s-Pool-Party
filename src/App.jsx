@@ -71,6 +71,15 @@ function dayFromDate(dateStr) {
   }
 }
 
+// Parse "YYYY-MM-DD" as local-midnight Date so timezone offsets don't make
+// today's game appear past on the day of the game (notably for users west
+// of UTC, where new Date("2026-05-04") parses to the previous local day).
+function parseLocalDate(dateStr) {
+  if (!dateStr) return new Date(NaN);
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d, 0, 0, 0, 0);
+}
+
 function genId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -558,7 +567,7 @@ export default function App() {
   }
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const upcomingGames = games.filter((g) => new Date(g.date) >= today);
+  const upcomingGames = games.filter((g) => parseLocalDate(g.date) >= today);
   const nextGame = upcomingGames[0] || games[0];
   const nextPlayers = nextGame ? (attendance[nextGame.id] || []) : [];
   const undoCount = undoStackRef.current.length;
@@ -761,14 +770,14 @@ export default function App() {
           )}
           {games.map((game) => {
             const confirmed = attendance[game.id] || [];
-            const isPast = new Date(game.date) < today;
+            const isPast = parseLocalDate(game.date) < today;
             const isEditing = editingGameId === game.id;
 
             return (
               <div
                 key={game.id}
                 className={`bg-white rounded-[2.5rem] overflow-hidden transition-all duration-300 ${
-                  isPast && !editMode ? 'opacity-30 grayscale scale-[0.98]' : 'hover:scale-[1.02] shadow-2xl'
+                  isPast ? 'opacity-60 scale-[0.98]' : 'hover:scale-[1.02] shadow-2xl'
                 }`}
               >
                 <div className="p-7">
@@ -784,27 +793,27 @@ export default function App() {
                       <span className="text-[11px] font-black text-gray-500 uppercase italic tracking-tighter">
                         {game.date}
                       </span>
+                      {!isEditing && (
+                        <button
+                          onClick={() => setEditingGameId(game.id)}
+                          className="p-1.5 rounded-full bg-gray-100 hover:bg-teal-100 text-gray-700 transition"
+                          title="Edit game"
+                        >
+                          <Pencil size={13} />
+                        </button>
+                      )}
                       {editMode && !isEditing && (
-                        <>
-                          <button
-                            onClick={() => setEditingGameId(game.id)}
-                            className="p-1.5 rounded-full bg-gray-100 hover:bg-teal-100 text-gray-700 transition"
-                            title="Edit game"
-                          >
-                            <Pencil size={13} />
-                          </button>
-                          <button
-                            onClick={async () => {
-                              if (window.confirm(`Delete game vs ${game.opponent} on ${game.date}?`)) {
-                                await deleteGame(game.id);
-                              }
-                            }}
-                            className="p-1.5 rounded-full bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-600 transition"
-                            title="Delete game"
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </>
+                        <button
+                          onClick={async () => {
+                            if (window.confirm(`Delete game vs ${game.opponent} on ${game.date}?`)) {
+                              await deleteGame(game.id);
+                            }
+                          }}
+                          className="p-1.5 rounded-full bg-gray-100 hover:bg-red-100 text-gray-700 hover:text-red-600 transition"
+                          title="Delete game"
+                        >
+                          <Trash2 size={13} />
+                        </button>
                       )}
                     </div>
                   </div>
@@ -853,7 +862,6 @@ export default function App() {
                                 <button
                                   key={player}
                                   onClick={() => toggleAttendance(game.id, player)}
-                                  disabled={isPast}
                                   className={`flex items-center justify-between px-4 py-3.5 rounded-2xl text-[10px] font-black transition-all border-2 ${
                                     isConfirmed
                                       ? 'text-white border-transparent'
